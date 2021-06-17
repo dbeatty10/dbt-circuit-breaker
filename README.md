@@ -15,12 +15,33 @@ packages:
     version: [">=0.1.0", "<0.2.0"]
 ```
 
+Install the package:
+
+```shell
+dbt deps
+```
+
 ## Usage
+
+`dbt run` will execute any tests and test suites that have been injected as stand-alone models in the DAG.
 
 See below for example source code for injecting dbt tests whenever you execute:
 ```shell
-dbt run
+dbt run --models +derived_table
 ```
+
+## Example
+
+Before:
+![alt text](images/dbt-dag-before.png)
+
+After:
+![alt text](images/dbt-dag-after.png)
+
+This package does **not** provide a single command that will convert schema tests in `_models.yml` to stand-alone models with the test materialization. It merely provides 2 new materializations and 1 macro that allow such models to be created by hand:
+- `test` materialization for a single test
+- `noop` materialization to represent a suite a tests
+- `tested` macro to depend on the _test suite_ of a model rather than depending directly on the model
 
 ### Source tree
 ```
@@ -41,60 +62,86 @@ dbt run
 
 The following example assumes that the [**dbt-utils**](https://github.com/fishtown-analytics/dbt-utils) package is installed along with the dbt-circuit-breaker package.
 
-`models/mart/base_table.sql`
+The base model to be tested.
 ```sql
+-- models/mart/base_table.sql
+
 {{ config(materialized='table')}}
 
 select * from {{ source('raw', 'your_raw_table') }}
 ```
 
-`models/mart/derived_table.sql`
+You want the derived table to depend on a suite of tests named `suite__base_table` rather than directly on `base_table`, but you still want to query from the base model.
 ```sql
+-- models/mart/derived_table.sql
+
 {{ config(materialized='table')}}
 
 select * from {{ dbt_circuit_breaker.tested('base_table', 'suite__base_table') }}
 ```
 
-`models/tests/base_table__test_1.sql`
+Configure two trivial tests.
 ```sql
+-- models/tests/base_table__test_1.sql
+
 {{ config (materialized="test") }}
 
-{{ dbt_utils.test_expression_is_true(ref("base_table"), expression="1=1") }}
+{{ dbt_utils.test_expression_is_true(ref('base_table'), expression="1=1") }}
 ```
 
-`models/tests/base_table__test_2.sql`
 ```sql
+-- models/tests/base_table__test_2.sql
+
 {{ config (materialized="test") }}
 
-{{ dbt_utils.test_expression_is_true(ref("base_table"), expression="2=2") }}
+{{ dbt_utils.test_expression_is_true(ref('base_table'), expression="2=2") }}
 ```
 
-`models/test_suites/suite__base_table.sql`
+**Note:** Change the expression to `1=0` in either of the tests above to trip the circuit breaker.
+
+Configure a suite a tests.
 ```sql
+-- models/test_suites/suite__base_table.sql
+
 {{ config(materialized='noop')}}
 
 -- All the test materializations for a single model:
--- {{ ref("base_table__test_1") }}
--- {{ ref("base_table__test_2") }}
--- {{ ref("base_table__test_3") }}
+-- {{ ref('base_table__test_1') }}
+-- {{ ref('base_table__test_2') }}
+```
+
+### Run
+
+Run the `derived_table` and all ancestors:
+```shell
+dbt run --models +derived_table
+```
+
+A circuit breaker will trip prior to the `derived_table` model if it depends on any test models that fail.
+
+Run the test suite for the base table and all its ancestors:
+```shell
+dbt run --models +suite__base_table
 ```
 
 ### Explanation
 Note how instances of the `ref()` macro are replaced with `tested()` in the downstream derived model.
 
-`tested(downstream_table, upstream_table)` is functionally equivalent to [forcing dependencies](https://docs.getdbt.com/reference/dbt-jinja-functions/ref#forcing-dependencies) like the following:
+`tested(upstream_model, test_suite)` is functionally equivalent to [forcing dependencies](https://docs.getdbt.com/reference/dbt-jinja-functions/ref#forcing-dependencies) like the following:
 ```sql
--- depends on: {{ ref("upstream_table") }}
-select * from {{ ref('downstream_table') }}
-```
+-- models/downstream_model.sql
 
+-- depends on: {{ ref('test_suite') }}
+select * from {{ ref('upstream_model') }}
+```
 
 ## Quality of life
 
 To lessen the typing burden, you can define the following macro within your _local_ project:
 
-`models/mart/derived_table.sql`
 ```sql
+-- macros/etc/tested.sql
+
 {% macro tested(model_name, test_suite) %}
 
   {% do return(dbt_circuit_breaker.tested(model_name, test_suite)) %}
